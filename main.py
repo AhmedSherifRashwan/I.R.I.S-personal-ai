@@ -10,14 +10,30 @@ import ollama
 import json
 import wave
 import numpy as np
+import random
+import edge_tts
+import asyncio
+import pygame
+import io
 
 # === Setup ===
 ACCESS_KEY = "5cfCv3qXiQfV5vUl0HkaS1fcp22yIju+lljpqDOn0vtSD4U7PP3VWQ=="  # put your key from Picovoice
-print("Initializing JARVIS...")
+print("Initializing IRIS...")
 os.environ["PATH"] += os.pathsep + r"C:\ffmpeg\bin"
 
-# Wake word engine
-porcupine = pvporcupine.create(access_key=ACCESS_KEY, keywords=["jarvis"])
+# Initialize pygame mixer for audio playback
+pygame.mixer.init()
+
+# Wake word engine - Custom wake word setup
+# After creating custom wake word, replace the keywords parameter:
+# porcupine = pvporcupine.create(
+#     access_key=ACCESS_KEY, 
+#     keyword_paths=["path/to/your/iris_en_windows_v3_0_0.ppn"]  # Path to downloaded .ppn file
+# )
+
+# For now, using default wake word:
+
+porcupine = pvporcupine.create(access_key=ACCESS_KEY, keyword_paths=["hey-Iris_en_windows_v3_0_0.ppn"])
 pa = pyaudio.PyAudio()
 stream = pa.open(rate=porcupine.sample_rate,
                  channels=1,
@@ -29,8 +45,8 @@ stream = pa.open(rate=porcupine.sample_rate,
 print("Loading Whisper model...")
 stt_model = whisper.load_model("base")  # try "tiny" for speed
 
-# Text-to-speech engine
-engine = pyttsx3.init()
+# Fallback TTS engine (pyttsx3)
+engine = pyttsx3.init(driverName='sapi5')
 voices = engine.getProperty("voices")
 # Use default voice if UK voice not found
 uk_voice_found = False
@@ -45,11 +61,117 @@ if not uk_voice_found:
 
 engine.setProperty("rate", 170)
 
-def speak(text):
-    print(f"JARVIS: {text}")
+# TTS Configuration
+USE_EDGE_TTS = True  # Set to False to use pyttsx3 instead
+
+# Add import for unique filenames
+import uuid
+
+async def _speak_with_edge_tts(text):
+    """Use Edge-TTS with proper audio playback"""
+    try:
+        # Create communication object
+        communicate = edge_tts.Communicate(text, "en-GB-LibbyNeural")
+        
+        # Collect all audio chunks
+        audio_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data += chunk["data"]
+        
+        # Play the audio using pygame
+        if audio_data:
+            # Use a unique temporary file name to avoid conflicts
+            import uuid
+            temp_audio_path = f"temp_tts_{uuid.uuid4().hex[:8]}.mp3"
+            
+            with open(temp_audio_path, "wb") as f:
+                f.write(audio_data)
+            
+            # Stop any currently playing music to avoid conflicts
+            pygame.mixer.music.stop()
+            time.sleep(0.05)  # Brief pause
+            
+            # Load and play the audio
+            pygame.mixer.music.load(temp_audio_path)
+            pygame.mixer.music.play()
+            
+            # Wait for playback to finish
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.05)
+            
+            # Small delay to ensure playback is complete
+            time.sleep(0.1)
+            
+            # Cleanup
+            try:
+                os.remove(temp_audio_path)
+            except:
+                pass
+                
+        return True  # Success
+                
+    except Exception as e:
+        print(f"Edge-TTS error: {e}")
+        return False  # Failed
+
+def _speak_with_pyttsx3(text):
+    """Fallback TTS using pyttsx3"""
     engine.say(text)
     engine.runAndWait()
+
+def speak(text):
+    """Main speak function with fallback support"""
+    print(f"IRIS: {text}")
     
+    if USE_EDGE_TTS:
+        success = False
+        try:
+            success = asyncio.run(_speak_with_edge_tts(text))
+        except Exception as e:
+            print(f"Edge-TTS failed: {e}")
+            success = False
+            
+        # Only fallback to pyttsx3 if Edge-TTS completely failed
+        if not success:
+            print("Falling back to pyttsx3...")
+            _speak_with_pyttsx3(text)
+    else:
+        _speak_with_pyttsx3(text)
+
+# Alternative implementation using Windows SAPI directly (if pygame doesn't work)
+def speak_alternative(text):
+    """Alternative speak function using Windows built-in TTS"""
+    print(f"IRIS: {text}")
+    
+    if os.name == 'nt':  # Windows
+        # Use Windows built-in speech
+        os.system(f'powershell -Command "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak(\'{text}\')"')
+    else:
+        # Fallback for other systems
+        _speak_with_pyttsx3(text)
+
+# === Immediate acknowledgment responses ===
+def get_acknowledgment():
+    """Returns a random acknowledgment phrase"""
+    acknowledgments = [
+        "Right away, sir.",
+        "Yes, sir.",
+        "On it, sir.",
+        "Certainly, sir.",
+        "Immediately, sir.",
+        "Of course, sir."
+    ]
+    return random.choice(acknowledgments)
+
+def quick_acknowledge_and_execute(action_func, custom_message=None):
+    """Immediately acknowledge the command then execute it"""
+    if custom_message:
+        speak(custom_message)
+    else:
+        speak(get_acknowledgment())
+    time.sleep(0.1)
+    action_func()
 
 # === Listening and transcription ===
 def listen_and_transcribe(duration=4):
@@ -105,7 +227,7 @@ def test_microphone():
     CHUNK = 1024
     
     try:
-        stream = pa_test.open(format=FORMAT,
+        stream_test = pa_test.open(format=FORMAT,
                              channels=CHANNELS,
                              rate=RATE,
                              input=True,
@@ -113,7 +235,7 @@ def test_microphone():
         
         print("Speak now to test your microphone...")
         for i in range(int(RATE / CHUNK * 5)):  # 5 seconds
-            data = stream.read(CHUNK, exception_on_overflow=False)
+            data = stream_test.read(CHUNK, exception_on_overflow=False)
             audio_data = np.frombuffer(data, dtype=np.int16)
             audio_level = np.sqrt(np.mean(audio_data**2))
             
@@ -122,8 +244,8 @@ def test_microphone():
             print(f"\r🔊 Level: [{level_display:<20}] {audio_level:.0f}   ", end="", flush=True)
         
         print("\n✅ Microphone test complete!")
-        stream.stop_stream()
-        stream.close()
+        stream_test.stop_stream()
+        stream_test.close()
         
     except Exception as e:
         print(f"❌ Microphone test failed: {e}")
@@ -136,10 +258,10 @@ def open_chrome():
             os.system("start chrome")
         else:  # Linux/Mac
             os.system("google-chrome &")
-        speak("Opening Chrome.")
+        print("Chrome opened successfully")
     except Exception as e:
         print(f"Error opening Chrome: {e}")
-        speak("I couldn't open Chrome.")
+        speak("I encountered an error opening Chrome, sir.")
 
 def open_last_excel():
     try:
@@ -147,14 +269,14 @@ def open_last_excel():
         project_path = r"C:\Users\Ahmed\OneDrive - regardian.com\GRC Projects - Projects\Tanmiah\3. Toolkit"
         
         if not os.path.exists(project_path):
-            speak("I couldn't find your Excel project folder.")
+            speak("I couldn't find your Excel project folder, sir.")
             return
 
         # Search for Excel files in the folder (xls, xlsx, xlsm, etc.)
         files = glob.glob(os.path.join(project_path, "*.xls*"))
 
         if not files:
-            speak("No Excel files found in your project folder.")
+            speak("No Excel files found in your project folder, sir.")
             return
 
         # Get the most recently modified file
@@ -164,11 +286,11 @@ def open_last_excel():
         if os.name == 'nt':  # Windows
             os.system(f'start excel "{last_file}"')
 
-        speak(f"Opening your last Excel project: {os.path.basename(last_file)}")
+        print(f"Excel project opened: {os.path.basename(last_file)}")
 
     except Exception as e:
         print(f"Error opening Excel project: {e}")
-        speak("I couldn't open your last Excel project.")
+        speak("I encountered an error opening your Excel project, sir.")
 
 def tell_plan():
     # TODO: integrate Google Calendar
@@ -177,7 +299,7 @@ def tell_plan():
 # === LLM Integration ===
 def interpret_command(command):
     prompt = f"""
-    You are JARVIS, a desktop AI assistant.
+    You are IRIS, a desktop AI assistant.
     The user said: "{command}".
     Map this to an action if possible.
 
@@ -234,48 +356,49 @@ def handle_command(command):
     plan_keywords = ["plan", "schedule", "agenda", "calendar", "meeting"]
     test_keywords = ["test", "microphone", "mic", "audio"]
 
+    # Check for Excel project specifically
     if "last excel project" in command_clean or "my excel project" in command_clean:
-        open_last_excel()
-    return
+        print(f"Excel project keyword detected in: '{command_clean}'")
+        quick_acknowledge_and_execute(open_last_excel)
+        return
 
-    
     # Check for microphone test
     if any(keyword in command_clean for keyword in test_keywords):
         print(f"Test keyword detected in: '{command_clean}'")
-        test_microphone()
+        quick_acknowledge_and_execute(test_microphone, "Testing microphone now, sir.")
         return
     
     # Check if any chrome keywords are present
     if any(keyword in command_clean for keyword in chrome_keywords):
         print(f"Chrome keyword detected in: '{command_clean}'")
-        open_chrome()
+        quick_acknowledge_and_execute(open_chrome)
         return
         
     # Check if any excel keywords are present  
     if any(keyword in command_clean for keyword in excel_keywords):
         print(f"Excel keyword detected in: '{command_clean}'")
-        open_last_excel()
+        quick_acknowledge_and_execute(open_last_excel)
         return
         
     # Check if any plan keywords are present
     if any(keyword in command_clean for keyword in plan_keywords):
         print(f"Plan keyword detected in: '{command_clean}'")
-        tell_plan()
+        quick_acknowledge_and_execute(tell_plan)
         return
     
     # --- Also check individual words for exact matches ---
     for word in words:
         if word in chrome_keywords:
             print(f"Chrome word match: '{word}'")
-            open_chrome()
+            quick_acknowledge_and_execute(open_chrome)
             return
         elif word in excel_keywords:
             print(f"Excel word match: '{word}'")
-            open_last_excel()
+            quick_acknowledge_and_execute(open_last_excel)
             return
         elif word in plan_keywords:
             print(f"Plan word match: '{word}'")
-            tell_plan()
+            quick_acknowledge_and_execute(tell_plan)
             return
     
     # --- Common greetings and simple responses ---
@@ -298,11 +421,11 @@ def handle_command(command):
     if "open" in command_clean:
         if any(word in command_clean for word in ["chrome", "browser", "google"]):
             print("Fallback: Detected 'open' + browser keyword")
-            open_chrome()
+            quick_acknowledge_and_execute(open_chrome)
             return
         elif any(word in command_clean for word in ["excel", "spreadsheet"]):
             print("Fallback: Detected 'open' + excel keyword")
-            open_last_excel()
+            quick_acknowledge_and_execute(open_last_excel)
             return
 
     # --- Otherwise, let the AI interpret ---
@@ -315,11 +438,11 @@ def handle_command(command):
         print(f"AI decision - Action: {action}, Response: {response}")
 
         if action == "open_chrome":
-            open_chrome()
+            quick_acknowledge_and_execute(open_chrome)
         elif action == "open_excel":
-            open_last_excel()
+            quick_acknowledge_and_execute(open_last_excel)
         elif action == "tell_plan":
-            tell_plan()
+            quick_acknowledge_and_execute(tell_plan)
         else:
             speak(response)
     except Exception as e:
@@ -327,8 +450,8 @@ def handle_command(command):
         speak("I'm having trouble processing that command.")
 
 # === Main loop ===
-print("JARVIS is ready! Listening for wake word 'Jarvis'...")
-speak("JARVIS is online and ready, sir.")
+print("IRIS is ready! Listening for wake word 'Computer'...")
+speak("Good morning sir.")
 
 try:
     while True:
@@ -353,7 +476,7 @@ try:
             continue
 
 except KeyboardInterrupt:
-    print("Shutting down JARVIS...")
+    print("Shutting down IRIS...")
     speak("Goodbye, sir.")
 finally:
     try:
@@ -361,6 +484,7 @@ finally:
         stream.close()
         pa.terminate()
         porcupine.delete()
+        pygame.mixer.quit()
     except:
         pass
-    print("JARVIS offline.")
+    print("IRIS offline.")
