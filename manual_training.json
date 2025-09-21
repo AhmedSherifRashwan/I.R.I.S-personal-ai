@@ -1,0 +1,7 @@
+{
+  "spotify": ["play music", "music app", "my jams"],
+  "chrome": ["browser", "internet", "google", "open web"],
+  "excel": ["spreadsheet", "workbook", "my excel project"],
+  "visual studio code": ["coding time", "open editor", "start coding"],
+  "Microsoft Word": ["word document", "open word", "create a word document"] 
+}
